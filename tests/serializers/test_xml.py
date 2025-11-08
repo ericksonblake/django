@@ -26,6 +26,7 @@ class XmlSerializerTestCase(SerializersTestBase, TestCase):
     <field name="pub_date" type="DateTimeField">2006-06-16T11:00:00</field>
     <field name="categories" rel="ManyToManyRel" to="serializers.category"><object pk="%(first_category_pk)s"></object><object pk="%(second_category_pk)s"></object></field>
     <field name="meta_data" rel="ManyToManyRel" to="serializers.categorymetadata"></field>
+    <field name="topics" rel="ManyToManyRel" to="serializers.topic"></field>
   </object>
 </django-objects>"""  # NOQA
 
@@ -69,7 +70,7 @@ class XmlSerializerTestCase(SerializersTestBase, TestCase):
         msg = "Article.headline (pk:%s) contains unserializable characters" % self.a1.pk
         with self.assertRaisesMessage(ValueError, msg):
             serializers.serialize(self.serializer_name, [self.a1])
-        self.a1.headline = "HT \u0009, LF \u000A, and CR \u000D are allowed"
+        self.a1.headline = "HT \u0009, LF \u000a, and CR \u000d are allowed"
         self.assertIn(
             "HT \t, LF \n, and CR \r are allowed",
             serializers.serialize(self.serializer_name, [self.a1]),

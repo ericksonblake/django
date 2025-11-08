@@ -2,10 +2,11 @@ from collections import namedtuple
 
 from django.db.backends.base.introspection import BaseDatabaseIntrospection
 from django.db.backends.base.introspection import FieldInfo as BaseFieldInfo
-from django.db.backends.base.introspection import TableInfo
-from django.db.models import Index
+from django.db.backends.base.introspection import TableInfo as BaseTableInfo
+from django.db.models import DB_CASCADE, DB_SET_DEFAULT, DB_SET_NULL, DO_NOTHING, Index
 
-FieldInfo = namedtuple("FieldInfo", BaseFieldInfo._fields + ("is_autofield",))
+FieldInfo = namedtuple("FieldInfo", [*BaseFieldInfo._fields, "is_autofield", "comment"])
+TableInfo = namedtuple("TableInfo", [*BaseTableInfo._fields, "comment"])
 
 
 class DatabaseIntrospection(BaseDatabaseIntrospection):
@@ -37,6 +38,14 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
 
     ignored_tables = []
 
+    on_delete_types = {
+        "a": DO_NOTHING,
+        "c": DB_CASCADE,
+        "d": DB_SET_DEFAULT,
+        "n": DB_SET_NULL,
+        # DB_RESTRICT - "r" is not supported.
+    }
+
     def get_field_type(self, data_type, description):
         field_type = super().get_field_type(data_type, description)
         if description.is_autofield or (
@@ -62,7 +71,8 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
                     WHEN c.relispartition THEN 'p'
                     WHEN c.relkind IN ('m', 'v') THEN 'v'
                     ELSE 't'
-                END
+                END,
+                obj_description(c.oid, 'pg_class')
             FROM pg_catalog.pg_class c
             LEFT JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
             WHERE c.relkind IN ('f', 'm', 'p', 'r', 'v')
@@ -91,7 +101,8 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
                 NOT (a.attnotnull OR (t.typtype = 'd' AND t.typnotnull)) AS is_nullable,
                 pg_get_expr(ad.adbin, ad.adrelid) AS column_default,
                 CASE WHEN collname = 'default' THEN NULL ELSE collname END AS collation,
-                a.attidentity != '' AS is_autofield
+                a.attidentity != '' AS is_autofield,
+                col_description(a.attrelid, a.attnum) AS column_comment
             FROM pg_attribute a
             LEFT JOIN pg_attrdef ad ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
             LEFT JOIN pg_collation co ON a.attcollation = co.oid
@@ -113,7 +124,8 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
             FieldInfo(
                 line.name,
                 line.type_code,
-                line.display_size,
+                # display_size is always None on psycopg2.
+                line.internal_size if line.display_size is None else line.display_size,
                 line.internal_size,
                 line.precision,
                 line.scale,
@@ -150,12 +162,15 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
 
     def get_relations(self, cursor, table_name):
         """
-        Return a dictionary of {field_name: (field_name_other_table, other_table)}
+        Return a dictionary of
+            {
+                field_name: (field_name_other_table, other_table, db_on_delete)
+            }
         representing all foreign keys in the given table.
         """
         cursor.execute(
             """
-            SELECT a1.attname, c2.relname, a2.attname
+            SELECT a1.attname, c2.relname, a2.attname, con.confdeltype
             FROM pg_constraint con
             LEFT JOIN pg_class c1 ON con.conrelid = c1.oid
             LEFT JOIN pg_class c2 ON con.confrelid = c2.oid
@@ -171,7 +186,10 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
         """,
             [table_name],
         )
-        return {row[0]: (row[2], row[1]) for row in cursor.fetchall()}
+        return {
+            row[0]: (row[2], row[1], self.on_delete_types.get(row[3]))
+            for row in cursor.fetchall()
+        }
 
     def get_constraints(self, cursor, table_name):
         """
@@ -202,7 +220,9 @@ class DatabaseIntrospection(BaseDatabaseIntrospection):
                 cl.reloptions
             FROM pg_constraint AS c
             JOIN pg_class AS cl ON c.conrelid = cl.oid
-            WHERE cl.relname = %s AND pg_catalog.pg_table_is_visible(cl.oid)
+            WHERE cl.relname = %s
+                AND pg_catalog.pg_table_is_visible(cl.oid)
+                AND c.contype != 'n'
         """,
             [table_name],
         )

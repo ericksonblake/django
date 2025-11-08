@@ -19,7 +19,7 @@ from django.contrib.admin.widgets import (
 from django.contrib.auth.models import User
 from django.db import models
 from django.forms.widgets import Select
-from django.test import SimpleTestCase, TestCase
+from django.test import RequestFactory, SimpleTestCase, TestCase
 from django.test.utils import isolate_apps
 
 from .models import Band, Concert, Song
@@ -73,12 +73,13 @@ class ModelAdminTests(TestCase):
         self.assertIsNone(ma.get_exclude(request, self.band))
 
     def test_default_fieldsets(self):
-        # fieldsets_add and fieldsets_change should return a special data structure that
-        # is used in the templates. They should generate the "right thing" whether we
-        # have specified a custom form, the fields argument, or nothing at all.
+        # fieldsets_add and fieldsets_change should return a special data
+        # structure that is used in the templates. They should generate the
+        # "right thing" whether we have specified a custom form, the fields
+        # argument, or nothing at all.
         #
-        # Here's the default case. There are no custom form_add/form_change methods,
-        # no fields argument, and no fieldsets argument.
+        # Here's the default case. There are no custom form_add/form_change
+        # methods, no fields argument, and no fieldsets argument.
         ma = ModelAdmin(Band, self.site)
         self.assertEqual(
             ma.get_fieldsets(request),
@@ -121,7 +122,10 @@ class ModelAdminTests(TestCase):
             fields = ["name"]
 
         ma = BandAdmin(Band, self.site)
-        self.assertTrue(ma.lookup_allowed("name__nonexistent", "test_value"))
+        self.assertIs(
+            ma.lookup_allowed("name__nonexistent", "test_value", request),
+            True,
+        )
 
     @isolate_apps("modeladmin")
     def test_lookup_allowed_onetoone(self):
@@ -147,11 +151,128 @@ class ModelAdminTests(TestCase):
         ma = EmployeeProfileAdmin(EmployeeProfile, self.site)
         # Reverse OneToOneField
         self.assertIs(
-            ma.lookup_allowed("employee__employeeinfo__description", "test_value"), True
+            ma.lookup_allowed(
+                "employee__employeeinfo__description", "test_value", request
+            ),
+            True,
         )
         # OneToOneField and ForeignKey
         self.assertIs(
-            ma.lookup_allowed("employee__department__code", "test_value"), True
+            ma.lookup_allowed("employee__department__code", "test_value", request),
+            True,
+        )
+
+    @isolate_apps("modeladmin")
+    def test_lookup_allowed_for_local_fk_fields(self):
+        class Country(models.Model):
+            pass
+
+        class Place(models.Model):
+            country = models.ForeignKey(Country, models.CASCADE)
+
+        class PlaceAdmin(ModelAdmin):
+            pass
+
+        ma = PlaceAdmin(Place, self.site)
+
+        cases = [
+            ("country", "1"),
+            ("country__exact", "1"),
+            ("country__id", "1"),
+            ("country__id__exact", "1"),
+            ("country__isnull", True),
+            ("country__isnull", False),
+            ("country__id__isnull", False),
+        ]
+        for lookup, lookup_value in cases:
+            with self.subTest(lookup=lookup):
+                self.assertIs(ma.lookup_allowed(lookup, lookup_value, request), True)
+
+    @isolate_apps("modeladmin")
+    def test_lookup_allowed_non_autofield_primary_key(self):
+        class Country(models.Model):
+            id = models.CharField(max_length=2, primary_key=True)
+
+        class Place(models.Model):
+            country = models.ForeignKey(Country, models.CASCADE)
+
+        class PlaceAdmin(ModelAdmin):
+            list_filter = ["country"]
+
+        ma = PlaceAdmin(Place, self.site)
+        self.assertIs(ma.lookup_allowed("country__id__exact", "DE", request), True)
+
+    @isolate_apps("modeladmin")
+    def test_lookup_allowed_foreign_primary(self):
+        class Country(models.Model):
+            name = models.CharField(max_length=256)
+
+        class Place(models.Model):
+            country = models.ForeignKey(Country, models.CASCADE)
+
+        class Restaurant(models.Model):
+            place = models.OneToOneField(Place, models.CASCADE, primary_key=True)
+
+        class Waiter(models.Model):
+            restaurant = models.ForeignKey(Restaurant, models.CASCADE)
+
+        class WaiterAdmin(ModelAdmin):
+            list_filter = [
+                "restaurant__place__country",
+                "restaurant__place__country__name",
+            ]
+
+        ma = WaiterAdmin(Waiter, self.site)
+        self.assertIs(
+            ma.lookup_allowed("restaurant__place__country", "1", request),
+            True,
+        )
+        self.assertIs(
+            ma.lookup_allowed("restaurant__place__country__id__exact", "1", request),
+            True,
+        )
+        self.assertIs(
+            ma.lookup_allowed(
+                "restaurant__place__country__name", "test_value", request
+            ),
+            True,
+        )
+
+    def test_lookup_allowed_considers_dynamic_list_filter(self):
+        class ConcertAdmin(ModelAdmin):
+            list_filter = ["main_band__sign_date"]
+
+            def get_list_filter(self, request):
+                if getattr(request, "user", None):
+                    return self.list_filter + ["main_band__name"]
+                return self.list_filter
+
+        model_admin = ConcertAdmin(Concert, self.site)
+        request_band_name_filter = RequestFactory().get(
+            "/", {"main_band__name": "test"}
+        )
+        self.assertIs(
+            model_admin.lookup_allowed(
+                "main_band__sign_date", "?", request_band_name_filter
+            ),
+            True,
+        )
+        self.assertIs(
+            model_admin.lookup_allowed(
+                "main_band__name", "?", request_band_name_filter
+            ),
+            False,
+        )
+        request_with_superuser = request
+        self.assertIs(
+            model_admin.lookup_allowed(
+                "main_band__sign_date", "?", request_with_superuser
+            ),
+            True,
+        )
+        self.assertIs(
+            model_admin.lookup_allowed("main_band__name", "?", request_with_superuser),
+            True,
         )
 
     def test_field_arguments(self):
@@ -174,7 +295,8 @@ class ModelAdminTests(TestCase):
         # Form class to the fields specified. This may cause errors to be
         # raised in the db layer if required model fields aren't in fields/
         # fieldsets, but that's preferable to ghost errors where a field in the
-        # Form class isn't being displayed because it's not in fields/fieldsets.
+        # Form class isn't being displayed because it's not in
+        # fields/fieldsets.
 
         # Using `fields`.
         class BandAdmin(ModelAdmin):
@@ -220,6 +342,7 @@ class ModelAdminTests(TestCase):
         conjunction with `ModelAdmin.readonly_fields` and when no
         `ModelAdmin.exclude` is defined (#14496).
         """
+
         # With ModelAdmin
         class AdminBandForm(forms.ModelForm):
             class Meta:
@@ -282,8 +405,10 @@ class ModelAdminTests(TestCase):
     def test_custom_form_meta_exclude(self):
         """
         The custom ModelForm's `Meta.exclude` is overridden if
-        `ModelAdmin.exclude` or `InlineModelAdmin.exclude` are defined (#14496).
+        `ModelAdmin.exclude` or `InlineModelAdmin.exclude` are defined
+        (#14496).
         """
+
         # With ModelAdmin
         class AdminBandForm(forms.ModelForm):
             class Meta:
@@ -509,7 +634,8 @@ class ModelAdminTests(TestCase):
         self.assertHTMLEqual(
             str(form["main_band"]),
             '<div class="related-widget-wrapper" data-model-ref="band">'
-            '<select name="main_band" id="id_main_band" required>'
+            '<select data-context="available-source" '
+            'name="main_band" id="id_main_band" required>'
             '<option value="" selected>---------</option>'
             '<option value="%d">The Beatles</option>'
             '<option value="%d">The Doors</option>'
@@ -532,7 +658,8 @@ class ModelAdminTests(TestCase):
         self.assertHTMLEqual(
             str(form["main_band"]),
             '<div class="related-widget-wrapper" data-model-ref="band">'
-            '<select name="main_band" id="id_main_band" required>'
+            '<select data-context="available-source" '
+            'name="main_band" id="id_main_band" required>'
             '<option value="" selected>---------</option>'
             '<option value="%d">The Doors</option>'
             "</select></div>" % self.band.id,
@@ -578,9 +705,10 @@ class ModelAdminTests(TestCase):
     def test_default_foreign_key_widget(self):
         # First, without any radio_fields specified, the widgets for ForeignKey
         # and fields with choices specified ought to be a basic Select widget.
-        # ForeignKey widgets in the admin are wrapped with RelatedFieldWidgetWrapper so
-        # they need to be handled properly when type checking. For Select fields, all of
-        # the choices lists have a first entry of dashes.
+        # ForeignKey widgets in the admin are wrapped with
+        # RelatedFieldWidgetWrapper so they need to be handled properly when
+        # type checking. For Select fields, all of the choices lists have a
+        # first entry of dashes.
         cma = ModelAdmin(Concert, self.site)
         cmafa = cma.get_form(request)
 
@@ -607,10 +735,11 @@ class ModelAdminTests(TestCase):
         )
 
     def test_foreign_key_as_radio_field(self):
-        # Now specify all the fields as radio_fields.  Widgets should now be
-        # RadioSelect, and the choices list should have a first entry of 'None' if
-        # blank=True for the model field.  Finally, the widget should have the
-        # 'radiolist' attr, and 'inline' as well if the field is specified HORIZONTAL.
+        # Now specify all the fields as radio_fields. Widgets should now be
+        # RadioSelect, and the choices list should have a first entry of 'None'
+        # if blank=True for the model field. Finally, the widget should have
+        # the 'radiolist' attr, and 'inline' as well if the field is specified
+        # HORIZONTAL.
         class ConcertAdmin(ModelAdmin):
             radio_fields = {
                 "main_band": HORIZONTAL,
@@ -626,7 +755,8 @@ class ModelAdminTests(TestCase):
             type(cmafa.base_fields["main_band"].widget.widget), AdminRadioSelect
         )
         self.assertEqual(
-            cmafa.base_fields["main_band"].widget.attrs, {"class": "radiolist inline"}
+            cmafa.base_fields["main_band"].widget.attrs,
+            {"class": "radiolist inline", "data-context": "available-source"},
         )
         self.assertEqual(
             list(cmafa.base_fields["main_band"].widget.choices),
@@ -637,7 +767,8 @@ class ModelAdminTests(TestCase):
             type(cmafa.base_fields["opening_band"].widget.widget), AdminRadioSelect
         )
         self.assertEqual(
-            cmafa.base_fields["opening_band"].widget.attrs, {"class": "radiolist"}
+            cmafa.base_fields["opening_band"].widget.attrs,
+            {"class": "radiolist", "data-context": "available-source"},
         )
         self.assertEqual(
             list(cmafa.base_fields["opening_band"].widget.choices),
@@ -707,7 +838,6 @@ class ModelAdminTests(TestCase):
         tests = (
             (ma.log_addition, ADDITION, {"added": {}}),
             (ma.log_change, CHANGE, {"changed": {"fields": ["name", "bio"]}}),
-            (ma.log_deletion, DELETION, str(self.band)),
         )
         for method, flag, message in tests:
             with self.subTest(name=method.__name__):
@@ -718,12 +848,52 @@ class ModelAdminTests(TestCase):
                 self.assertEqual(fetched.content_type, content_type)
                 self.assertEqual(fetched.object_id, str(self.band.pk))
                 self.assertEqual(fetched.user, mock_request.user)
-                if flag == DELETION:
-                    self.assertEqual(fetched.change_message, "")
-                    self.assertEqual(fetched.object_repr, message)
-                else:
-                    self.assertEqual(fetched.change_message, str(message))
-                    self.assertEqual(fetched.object_repr, str(self.band))
+                self.assertEqual(fetched.change_message, str(message))
+                self.assertEqual(fetched.object_repr, str(self.band))
+
+    def test_log_deletions(self):
+        ma = ModelAdmin(Band, self.site)
+        mock_request = MockRequest()
+        mock_request.user = User.objects.create(username="akash")
+        content_type = get_content_type_for_model(self.band)
+        Band.objects.create(
+            name="The Beatles",
+            bio="A legendary rock band from Liverpool.",
+            sign_date=date(1962, 1, 1),
+        )
+        Band.objects.create(
+            name="Mohiner Ghoraguli",
+            bio="A progressive rock band from Calcutta.",
+            sign_date=date(1975, 1, 1),
+        )
+        queryset = Band.objects.all().order_by("-id")[:3]
+        self.assertEqual(len(queryset), 3)
+        with self.assertNumQueries(1):
+            ma.log_deletions(mock_request, queryset)
+        logs = (
+            LogEntry.objects.filter(action_flag=DELETION)
+            .order_by("id")
+            .values_list(
+                "user_id",
+                "content_type",
+                "object_id",
+                "object_repr",
+                "action_flag",
+                "change_message",
+            )
+        )
+        expected_log_values = [
+            (
+                mock_request.user.id,
+                content_type.id,
+                str(obj.pk),
+                str(obj),
+                DELETION,
+                "",
+            )
+            for obj in queryset
+        ]
+        self.assertSequenceEqual(logs, expected_log_values)
 
     def test_get_autocomplete_fields(self):
         class NameAdmin(ModelAdmin):
@@ -758,7 +928,7 @@ class ModelAdminTests(TestCase):
             username="bob", email="bob@test.com", password="test"
         )
         self.site.register(Band, ModelAdmin)
-        ma = self.site._registry[Band]
+        ma = self.site.get_model_admin(Band)
         (
             deletable_objects,
             model_count,
@@ -772,8 +942,8 @@ class ModelAdminTests(TestCase):
 
     def test_get_deleted_objects_with_custom_has_delete_permission(self):
         """
-        ModelAdmin.get_deleted_objects() uses ModelAdmin.has_delete_permission()
-        for permissions checking.
+        ModelAdmin.get_deleted_objects() uses
+        ModelAdmin.has_delete_permission() for permissions checking.
         """
         mock_request = MockRequest()
         mock_request.user = User.objects.create_superuser(
@@ -785,7 +955,7 @@ class ModelAdminTests(TestCase):
                 return False
 
         self.site.register(Band, TestModelAdmin)
-        ma = self.site._registry[Band]
+        ma = self.site.get_model_admin(Band)
         (
             deletable_objects,
             model_count,

@@ -14,8 +14,9 @@ class RedisSerializer:
         self.protocol = pickle.HIGHEST_PROTOCOL if protocol is None else protocol
 
     def dumps(self, obj):
-        # Only skip pickling for integers, a int subclasses as bool should be
-        # pickled.
+        # For better incr() and decr() atomicity, don't pickle integers.
+        # Using type() rather than isinstance() matches only integers and not
+        # subclasses like bool.
         if type(obj) is int:
             return obj
         return pickle.dumps(obj, self.protocol)
@@ -130,7 +131,7 @@ class RedisCacheClient:
         return bool(client.exists(key))
 
     def incr(self, key, delta):
-        client = self.get_client(key)
+        client = self.get_client(key, write=True)
         if not client.exists(key):
             raise ValueError("Key '%s' not found." % key)
         return client.incr(key, delta)

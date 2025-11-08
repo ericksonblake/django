@@ -4,8 +4,8 @@ from django.contrib.gis import forms
 from django.contrib.gis.forms import BaseGeometryWidget, OpenLayersWidget
 from django.contrib.gis.geos import GEOSGeometry
 from django.core.exceptions import ValidationError
+from django.template.defaultfilters import json_script
 from django.test import SimpleTestCase, override_settings
-from django.utils.deprecation import RemovedInDjango51Warning
 from django.utils.html import escape
 
 
@@ -34,7 +34,8 @@ class GeometryFieldTest(SimpleTestCase):
         xform_geom = GEOSGeometry(
             "POINT (951640.547328465 4219369.26171664)", srid=32140
         )
-        # The cleaned geometry is transformed to 32140 (the widget map_srid is 3857).
+        # The cleaned geometry is transformed to 32140 (the widget map_srid is
+        # 3857).
         cleaned_geom = fld.clean(
             "SRID=3857;POINT (-10615777.40976205 3473169.895707852)"
         )
@@ -73,7 +74,8 @@ class GeometryFieldTest(SimpleTestCase):
             GEOSGeometry("POINT(5 23)", srid=pnt_fld.widget.map_srid),
             pnt_fld.clean("POINT(5 23)"),
         )
-        # a WKT for any other geom_type will be properly transformed by `to_python`
+        # a WKT for any other geom_type will be properly transformed by
+        # `to_python`
         self.assertEqual(
             GEOSGeometry("LINESTRING(0 0, 1 1)", srid=pnt_fld.widget.map_srid),
             pnt_fld.to_python("LINESTRING(0 0, 1 1)"),
@@ -184,6 +186,37 @@ class GeometryFieldTest(SimpleTestCase):
             "unrecognized as WKT EWKT, and HEXEWKB.)",
         )
 
+    def test_override_attrs(self):
+        self.assertIsNone(forms.BaseGeometryWidget.base_layer)
+        self.assertEqual(forms.BaseGeometryWidget.geom_type, "GEOMETRY")
+        self.assertEqual(forms.BaseGeometryWidget.map_srid, 4326)
+        self.assertIs(forms.BaseGeometryWidget.display_raw, False)
+
+        class PointForm(forms.Form):
+            p = forms.PointField(
+                widget=forms.OpenLayersWidget(
+                    attrs={
+                        "base_layer": "some-test-file",
+                        "map_srid": 1234,
+                    }
+                ),
+            )
+
+        form = PointForm()
+        rendered = form.as_p()
+
+        attrs = {
+            "base_layer": "some-test-file",
+            "geom_type": "POINT",
+            "map_srid": 1234,
+            "display_raw": False,
+            "required": True,
+            "id": "id_p",
+            "geom_name": "Point",
+        }
+        expected = json_script(attrs, "id_p_mapwidget_options")
+        self.assertInHTML(expected, rendered)
+
 
 class SpecializedFieldTest(SimpleTestCase):
     def setUp(self):
@@ -251,15 +284,29 @@ class SpecializedFieldTest(SimpleTestCase):
             ),
         }
 
-    def assertMapWidget(self, form_instance):
+    def assertMapWidget(self, form_instance, geom_name):
         """
         Make sure the MapWidget js is passed in the form media and a MapWidget
         is actually created
         """
         self.assertTrue(form_instance.is_valid())
         rendered = form_instance.as_p()
-        self.assertIn("new MapWidget(options);", rendered)
-        self.assertIn("map_srid: 3857,", rendered)
+
+        map_fields = [
+            f for f in form_instance if isinstance(f.field, forms.GeometryField)
+        ]
+        for map_field in map_fields:
+            attrs = {
+                "base_layer": "nasaWorldview",
+                "geom_type": map_field.field.geom_type,
+                "map_srid": 3857,
+                "display_raw": False,
+                "required": True,
+                "id": map_field.id_for_label,
+                "geom_name": geom_name,
+            }
+            expected = json_script(attrs, f"{map_field.id_for_label}_mapwidget_options")
+            self.assertInHTML(expected, rendered)
         self.assertIn("gis/js/OLMapWidget.js", str(form_instance.media))
 
     def assertTextarea(self, geom, rendered):
@@ -280,7 +327,7 @@ class SpecializedFieldTest(SimpleTestCase):
         geom = self.geometries["point"]
         form = PointForm(data={"p": geom})
         self.assertTextarea(geom, form.as_p())
-        self.assertMapWidget(form)
+        self.assertMapWidget(form, "Point")
         self.assertFalse(PointForm().is_valid())
         invalid = PointForm(data={"p": "some invalid geom"})
         self.assertFalse(invalid.is_valid())
@@ -296,7 +343,7 @@ class SpecializedFieldTest(SimpleTestCase):
         geom = self.geometries["multipoint"]
         form = PointForm(data={"p": geom})
         self.assertTextarea(geom, form.as_p())
-        self.assertMapWidget(form)
+        self.assertMapWidget(form, "MultiPoint")
         self.assertFalse(PointForm().is_valid())
 
         for invalid in [
@@ -311,7 +358,7 @@ class SpecializedFieldTest(SimpleTestCase):
         geom = self.geometries["linestring"]
         form = LineStringForm(data={"f": geom})
         self.assertTextarea(geom, form.as_p())
-        self.assertMapWidget(form)
+        self.assertMapWidget(form, "LineString")
         self.assertFalse(LineStringForm().is_valid())
 
         for invalid in [
@@ -326,7 +373,7 @@ class SpecializedFieldTest(SimpleTestCase):
         geom = self.geometries["multilinestring"]
         form = LineStringForm(data={"f": geom})
         self.assertTextarea(geom, form.as_p())
-        self.assertMapWidget(form)
+        self.assertMapWidget(form, "MultiLineString")
         self.assertFalse(LineStringForm().is_valid())
 
         for invalid in [
@@ -341,7 +388,7 @@ class SpecializedFieldTest(SimpleTestCase):
         geom = self.geometries["polygon"]
         form = PolygonForm(data={"p": geom})
         self.assertTextarea(geom, form.as_p())
-        self.assertMapWidget(form)
+        self.assertMapWidget(form, "Polygon")
         self.assertFalse(PolygonForm().is_valid())
 
         for invalid in [
@@ -356,7 +403,7 @@ class SpecializedFieldTest(SimpleTestCase):
         geom = self.geometries["multipolygon"]
         form = PolygonForm(data={"p": geom})
         self.assertTextarea(geom, form.as_p())
-        self.assertMapWidget(form)
+        self.assertMapWidget(form, "MultiPolygon")
         self.assertFalse(PolygonForm().is_valid())
 
         for invalid in [
@@ -371,7 +418,7 @@ class SpecializedFieldTest(SimpleTestCase):
         geom = self.geometries["geometrycollection"]
         form = GeometryForm(data={"g": geom})
         self.assertTextarea(geom, form.as_p())
-        self.assertMapWidget(form)
+        self.assertMapWidget(form, "GeometryCollection")
         self.assertFalse(GeometryForm().is_valid())
 
         for invalid in [
@@ -394,8 +441,8 @@ class OSMWidgetTest(SimpleTestCase):
         form = PointForm(data={"p": geom})
         rendered = form.as_p()
 
-        self.assertIn("ol.source.OSM()", rendered)
-        self.assertIn("id: 'id_p',", rendered)
+        self.assertIn('"base_layer": "osm"', rendered)
+        self.assertIn('<textarea id="id_p"', rendered)
 
     def test_default_lat_lon(self):
         self.assertEqual(forms.OSMWidget.default_lon, 5)
@@ -416,9 +463,20 @@ class OSMWidgetTest(SimpleTestCase):
         form = PointForm()
         rendered = form.as_p()
 
-        self.assertIn("options['default_lon'] = 20;", rendered)
-        self.assertIn("options['default_lat'] = 30;", rendered)
-        self.assertIn("options['default_zoom'] = 17;", rendered)
+        attrs = {
+            "base_layer": "osm",
+            "geom_type": "POINT",
+            "map_srid": 3857,
+            "display_raw": False,
+            "default_lon": 20,
+            "default_lat": 30,
+            "default_zoom": 17,
+            "required": True,
+            "id": "id_p",
+            "geom_name": "Point",
+        }
+        expected = json_script(attrs, "id_p_mapwidget_options")
+        self.assertInHTML(expected, rendered)
 
 
 class GeometryWidgetTests(SimpleTestCase):
@@ -426,15 +484,15 @@ class GeometryWidgetTests(SimpleTestCase):
         # The Widget.get_context() attrs argument overrides self.attrs.
         widget = BaseGeometryWidget(attrs={"geom_type": "POINT"})
         context = widget.get_context("point", None, attrs={"geom_type": "POINT2"})
-        self.assertEqual(context["geom_type"], "POINT2")
+        self.assertEqual(context["widget"]["attrs"]["geom_type"], "POINT2")
         # Widget.get_context() returns expected name for geom_type.
         widget = BaseGeometryWidget(attrs={"geom_type": "POLYGON"})
         context = widget.get_context("polygon", None, None)
-        self.assertEqual(context["geom_type"], "Polygon")
+        self.assertEqual(context["widget"]["attrs"]["geom_name"], "Polygon")
         # Widget.get_context() returns 'Geometry' instead of 'Unknown'.
         widget = BaseGeometryWidget(attrs={"geom_type": "GEOMETRY"})
         context = widget.get_context("geometry", None, None)
-        self.assertEqual(context["geom_type"], "Geometry")
+        self.assertEqual(context["widget"]["attrs"]["geom_name"], "Geometry")
 
     def test_subwidgets(self):
         widget = forms.BaseGeometryWidget()
@@ -444,11 +502,11 @@ class GeometryWidgetTests(SimpleTestCase):
                 {
                     "is_hidden": False,
                     "attrs": {
-                        "map_srid": 4326,
-                        "map_width": 600,
-                        "geom_type": "GEOMETRY",
-                        "map_height": 400,
+                        "base_layer": None,
                         "display_raw": False,
+                        "map_srid": 4326,
+                        "geom_name": "Geometry",
+                        "geom_type": "GEOMETRY",
                     },
                     "name": "name",
                     "template_name": "",
@@ -486,19 +544,3 @@ class GeometryWidgetTests(SimpleTestCase):
         form = PointForm(data={"p": point.json})
         self.assertTrue(form.is_valid())
         self.assertEqual(form.cleaned_data["p"].srid, 4326)
-
-    def test_deprecated_width_and_height(self):
-        class CustomGeometryWidget(forms.BaseGeometryWidget):
-            map_height = 300
-            map_width = 550
-
-        msg = (
-            "The map_height and map_width widget attributes are deprecated. Please use "
-            "CSS to size map widgets."
-        )
-        with self.assertRaisesMessage(RemovedInDjango51Warning, msg):
-            CustomGeometryWidget()
-        with self.assertRaisesMessage(RemovedInDjango51Warning, msg):
-            forms.BaseGeometryWidget({"map_width": 400})
-        with self.assertRaisesMessage(RemovedInDjango51Warning, msg):
-            forms.BaseGeometryWidget({"map_height": 600})

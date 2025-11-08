@@ -1,12 +1,10 @@
-import psycopg2
-
 from django.db.backends.base.schema import BaseDatabaseSchemaEditor
 from django.db.backends.ddl_references import IndexColumns
+from django.db.backends.postgresql.psycopg_any import sql
 from django.db.backends.utils import strip_quotes
 
 
 class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
-
     # Setting all constraints to IMMEDIATE to allow changing data in the same
     # transaction.
     sql_update_with_default = (
@@ -30,8 +28,8 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
     # Setting the constraint to IMMEDIATE to allow changing data in the same
     # transaction.
     sql_create_column_inline_fk = (
-        "CONSTRAINT %(name)s REFERENCES %(to_table)s(%(to_column)s)%(deferrable)s"
-        "; SET CONSTRAINTS %(namespace)s%(name)s IMMEDIATE"
+        "CONSTRAINT %(name)s REFERENCES %(to_table)s(%(to_column)s)%(on_delete_db)s"
+        "%(deferrable)s; SET CONSTRAINTS %(namespace)s%(name)s IMMEDIATE"
     )
     # Setting the constraint to IMMEDIATE runs any deferred checks to allow
     # dropping it in the same transaction.
@@ -40,6 +38,14 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         "ALTER TABLE %(table)s DROP CONSTRAINT %(name)s"
     )
     sql_delete_procedure = "DROP FUNCTION %(procedure)s(%(param_types)s)"
+
+    def execute(self, sql, params=()):
+        # Merge the query client-side, as PostgreSQL won't do it server-side.
+        if params is None:
+            return super().execute(sql, params)
+        sql = self.connection.ops.compose_sql(str(sql), params)
+        # Don't let the superclass touch anything.
+        return super().execute(sql, None)
 
     sql_add_identity = (
         "ALTER TABLE %(table)s ALTER COLUMN %(column)s ADD "
@@ -50,13 +56,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
     )
 
     def quote_value(self, value):
-        if isinstance(value, str):
-            value = value.replace("%", "%%")
-        adapted = psycopg2.extensions.adapt(value)
-        if hasattr(adapted, "encoding"):
-            adapted.encoding = "utf8"
-        # getquoted() returns a quoted bytestring of the adapted value.
-        return adapted.getquoted().decode()
+        return sql.quote(value, self.connection.connection)
 
     def _field_indexes_sql(self, model, field):
         output = super()._field_indexes_sql(model, field)
@@ -98,7 +98,10 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
                 return None
             # Non-deterministic collations on Postgresql don't support indexes
             # for operator classes varchar_pattern_ops/text_pattern_ops.
-            if getattr(field, "db_collation", None):
+            collation_name = getattr(field, "db_collation", None)
+            if not collation_name and field.is_relation:
+                collation_name = getattr(field.target_field, "db_collation", None)
+            if collation_name and not self._is_collation_deterministic(collation_name):
                 return None
             if db_type.startswith("varchar"):
                 return self._create_index_sql(
@@ -117,6 +120,8 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         return None
 
     def _using_sql(self, new_field, old_field):
+        if new_field.generated:
+            return ""
         using_sql = " USING %(column)s::%(type)s"
         new_internal_type = new_field.get_internal_type()
         old_internal_type = old_field.get_internal_type()
@@ -137,22 +142,29 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
                     return sequence["name"]
         return None
 
-    def _alter_column_type_sql(self, model, old_field, new_field, new_type):
+    def _is_changing_type_of_indexed_text_column(self, old_field, old_type, new_type):
+        return (old_field.db_index or old_field.unique) and (
+            (old_type.startswith("varchar") and not new_type.startswith("varchar"))
+            or (old_type.startswith("text") and not new_type.startswith("text"))
+            or (old_type.startswith("citext") and not new_type.startswith("citext"))
+        )
+
+    def _alter_column_type_sql(
+        self, model, old_field, new_field, new_type, old_collation, new_collation
+    ):
         # Drop indexes on varchar/text/citext columns that are changing to a
         # different type.
         old_db_params = old_field.db_parameters(connection=self.connection)
         old_type = old_db_params["type"]
-        if (old_field.db_index or old_field.unique) and (
-            (old_type.startswith("varchar") and not new_type.startswith("varchar"))
-            or (old_type.startswith("text") and not new_type.startswith("text"))
-            or (old_type.startswith("citext") and not new_type.startswith("citext"))
-        ):
+        if self._is_changing_type_of_indexed_text_column(old_field, old_type, new_type):
             index_name = self._create_index_name(
                 model._meta.db_table, [old_field.column], suffix="_like"
             )
             self.execute(self._delete_index_sql(model, index_name))
 
-        self.sql_alter_column_type = "ALTER COLUMN %(column)s TYPE %(type)s"
+        self.sql_alter_column_type = (
+            "ALTER COLUMN %(column)s TYPE %(type)s%(collation)s"
+        )
         # Cast when data type changed.
         if using_sql := self._using_sql(new_field, old_field):
             self.sql_alter_column_type += using_sql
@@ -175,6 +187,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
                     % {
                         "column": self.quote_name(column),
                         "type": new_type,
+                        "collation": "",
                     },
                     [],
                 ),
@@ -201,7 +214,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
             )
             column = strip_quotes(new_field.column)
             fragment, _ = super()._alter_column_type_sql(
-                model, old_field, new_field, new_type
+                model, old_field, new_field, new_type, old_collation, new_collation
             )
             # Drop the sequence if exists (Django 4.1+ identity columns don't
             # have it).
@@ -219,7 +232,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
             return fragment, other_actions
         elif new_is_auto and old_is_auto and old_internal_type != new_internal_type:
             fragment, _ = super()._alter_column_type_sql(
-                model, old_field, new_field, new_type
+                model, old_field, new_field, new_type, old_collation, new_collation
             )
             column = strip_quotes(new_field.column)
             db_types = {
@@ -243,26 +256,9 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
                 ]
             return fragment, other_actions
         else:
-            return super()._alter_column_type_sql(model, old_field, new_field, new_type)
-
-    def _alter_column_collation_sql(
-        self, model, new_field, new_type, new_collation, old_field
-    ):
-        sql = self.sql_alter_column_collate
-        # Cast when data type changed.
-        if using_sql := self._using_sql(new_field, old_field):
-            sql += using_sql
-        return (
-            sql
-            % {
-                "column": self.quote_name(new_field.column),
-                "type": new_type,
-                "collation": " " + self._collate_sql(new_collation)
-                if new_collation
-                else "",
-            },
-            [],
-        )
+            return super()._alter_column_type_sql(
+                model, old_field, new_field, new_type, old_collation, new_collation
+            )
 
     def _alter_field(
         self,
@@ -286,8 +282,14 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
             strict,
         )
         # Added an index? Create any PostgreSQL-specific indexes.
-        if (not (old_field.db_index or old_field.unique) and new_field.db_index) or (
-            not old_field.unique and new_field.unique
+        if (
+            (not (old_field.db_index or old_field.unique) and new_field.db_index)
+            or (not old_field.unique and new_field.unique)
+            or (
+                self._is_changing_type_of_indexed_text_column(
+                    old_field, old_type, new_type
+                )
+            )
         ):
             like_index_statement = self._create_like_index_sql(model, new_field)
             if like_index_statement is not None:
@@ -320,7 +322,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         self.execute(index.remove_sql(model, self, concurrently=concurrently))
 
     def _delete_index_sql(self, model, name, sql=None, concurrently=False):
-        sql = (
+        sql = sql or (
             self.sql_delete_index_concurrently
             if concurrently
             else self.sql_delete_index
@@ -344,7 +346,7 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
         include=None,
         expressions=None,
     ):
-        sql = (
+        sql = sql or (
             self.sql_create_index
             if not concurrently
             else self.sql_create_index_concurrently
@@ -363,3 +365,16 @@ class DatabaseSchemaEditor(BaseDatabaseSchemaEditor):
             include=include,
             expressions=expressions,
         )
+
+    def _is_collation_deterministic(self, collation_name):
+        with self.connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT collisdeterministic
+                FROM pg_collation
+                WHERE collname = %s
+                """,
+                [collation_name],
+            )
+            row = cursor.fetchone()
+            return row[0] if row else None

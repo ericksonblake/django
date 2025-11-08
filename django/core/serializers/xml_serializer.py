@@ -1,6 +1,7 @@
 """
 XML serializer.
 """
+
 import json
 from xml.dom import pulldom
 from xml.sax import handler
@@ -55,7 +56,7 @@ class Serializer(base.Serializer):
         if not self.use_natural_primary_keys or not hasattr(obj, "natural_key"):
             obj_pk = obj.pk
             if obj_pk is not None:
-                attrs["pk"] = str(obj_pk)
+                attrs["pk"] = obj._meta.pk.value_to_string(obj)
 
         self.xml.startElement("object", attrs)
 
@@ -105,7 +106,7 @@ class Serializer(base.Serializer):
         differently from regular fields).
         """
         self._start_relational_field(field)
-        related_att = getattr(obj, field.get_attname())
+        related_att = getattr(obj, field.attname)
         if related_att is not None:
             if self.use_natural_foreign_keys and hasattr(
                 field.remote_field.model, "natural_key"
@@ -147,7 +148,11 @@ class Serializer(base.Serializer):
                     self.xml.endElement("object")
 
                 def queryset_iterator(obj, field):
-                    return getattr(obj, field.name).iterator()
+                    attr = getattr(obj, field.name)
+                    chunk_size = (
+                        2000 if getattr(attr, "prefetch_cache_name", None) else None
+                    )
+                    return attr.iterator(chunk_size)
 
             else:
 
@@ -155,7 +160,9 @@ class Serializer(base.Serializer):
                     self.xml.addQuickElement("object", attrs={"pk": str(value.pk)})
 
                 def queryset_iterator(obj, field):
-                    return getattr(obj, field.name).only("pk").iterator()
+                    query_set = getattr(obj, field.name).select_related(None).only("pk")
+                    chunk_size = 2000 if query_set._prefetch_related_lookups else None
+                    return query_set.iterator(chunk_size=chunk_size)
 
             m2m_iter = getattr(obj, "_prefetched_objects_cache", {}).get(
                 field.name,
@@ -243,7 +250,8 @@ class Deserializer(base.Deserializer):
                 continue
             field = Model._meta.get_field(field_name)
 
-            # As is usually the case, relation fields get the special treatment.
+            # As is usually the case, relation fields get the special
+            # treatment.
             if field.remote_field and isinstance(
                 field.remote_field, models.ManyToManyRel
             ):
@@ -296,7 +304,8 @@ class Deserializer(base.Deserializer):
             if hasattr(model._default_manager, "get_by_natural_key"):
                 keys = node.getElementsByTagName("natural")
                 if keys:
-                    # If there are 'natural' subelements, it must be a natural key
+                    # If there are 'natural' subelements, it must be a natural
+                    # key
                     field_value = [getInnerText(k).strip() for k in keys]
                     try:
                         obj = model._default_manager.db_manager(
@@ -336,7 +345,8 @@ class Deserializer(base.Deserializer):
             def m2m_convert(n):
                 keys = n.getElementsByTagName("natural")
                 if keys:
-                    # If there are 'natural' subelements, it must be a natural key
+                    # If there are 'natural' subelements, it must be a natural
+                    # key
                     field_value = [getInnerText(k).strip() for k in keys]
                     obj_pk = (
                         default_manager.db_manager(self.db)
@@ -387,7 +397,8 @@ class Deserializer(base.Deserializer):
 
 def getInnerText(node):
     """Get all the inner text of a DOM node (recursively)."""
-    # inspired by https://mail.python.org/pipermail/xml-sig/2005-March/011022.html
+    # inspired by
+    # https://mail.python.org/pipermail/xml-sig/2005-March/011022.html
     inner_text = []
     for child in node.childNodes:
         if (

@@ -5,13 +5,9 @@ import logging
 import threading
 import time
 import warnings
+import zoneinfo
 from collections import deque
 from contextlib import contextmanager
-
-try:
-    import zoneinfo
-except ImportError:
-    from backports import zoneinfo
 
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
@@ -19,8 +15,9 @@ from django.db import DEFAULT_DB_ALIAS, DatabaseError, NotSupportedError
 from django.db.backends import utils
 from django.db.backends.base.validation import BaseDatabaseValidation
 from django.db.backends.signals import connection_created
+from django.db.backends.utils import debug_transaction
 from django.db.transaction import TransactionManagementError
-from django.db.utils import DatabaseErrorWrapper
+from django.db.utils import DatabaseErrorWrapper, ProgrammingError
 from django.utils.asyncio import async_unsafe
 from django.utils.functional import cached_property
 
@@ -28,15 +25,6 @@ NO_DB_ALIAS = "__no_db__"
 RAN_DB_VERSION_CHECK = set()
 
 logger = logging.getLogger("django.db.backends.base")
-
-
-# RemovedInDjango50Warning
-def timezone_constructor(tzname):
-    if settings.USE_DEPRECATED_PYTZ:
-        import pytz
-
-        return pytz.timezone(tzname)
-    return zoneinfo.ZoneInfo(tzname)
 
 
 class BaseDatabaseWrapper:
@@ -162,9 +150,9 @@ class BaseDatabaseWrapper:
         if not settings.USE_TZ:
             return None
         elif self.settings_dict["TIME_ZONE"] is None:
-            return datetime.timezone.utc
+            return datetime.UTC
         else:
-            return timezone_constructor(self.settings_dict["TIME_ZONE"])
+            return zoneinfo.ZoneInfo(self.settings_dict["TIME_ZONE"])
 
     @cached_property
     def timezone_name(self):
@@ -187,7 +175,8 @@ class BaseDatabaseWrapper:
         if len(self.queries_log) == self.queries_log.maxlen:
             warnings.warn(
                 "Limit for query logging exceeded, only the last {} queries "
-                "will be returned.".format(self.queries_log.maxlen)
+                "will be returned.".format(self.queries_log.maxlen),
+                stacklevel=2,
             )
         return list(self.queries_log)
 
@@ -232,7 +221,6 @@ class BaseDatabaseWrapper:
 
     def init_connection_state(self):
         """Initialize the database connection settings."""
-        global RAN_DB_VERSION_CHECK
         if self.alias not in RAN_DB_VERSION_CHECK:
             self.check_database_version_supported()
             RAN_DB_VERSION_CHECK.add(self.alias)
@@ -283,6 +271,10 @@ class BaseDatabaseWrapper:
     def ensure_connection(self):
         """Guarantee that a connection to the database is established."""
         if self.connection is None:
+            if self.in_atomic_block and self.closed_in_transaction:
+                raise ProgrammingError(
+                    "Cannot open a new connection in an atomic block."
+                )
             with self.wrap_database_errors:
                 self.connect()
 
@@ -307,12 +299,12 @@ class BaseDatabaseWrapper:
 
     def _commit(self):
         if self.connection is not None:
-            with self.wrap_database_errors:
+            with debug_transaction(self, "COMMIT"), self.wrap_database_errors:
                 return self.connection.commit()
 
     def _rollback(self):
         if self.connection is not None:
-            with self.wrap_database_errors:
+            with debug_transaction(self, "ROLLBACK"), self.wrap_database_errors:
                 return self.connection.rollback()
 
     def _close(self):
@@ -488,9 +480,11 @@ class BaseDatabaseWrapper:
 
         if start_transaction_under_autocommit:
             self._start_transaction_under_autocommit()
-        else:
+        elif autocommit:
             self._set_autocommit(autocommit)
-
+        else:
+            with debug_transaction(self, "BEGIN"):
+                self._set_autocommit(autocommit)
         self.autocommit = autocommit
 
         if autocommit and self.run_commit_hooks_on_set_autocommit_on:
@@ -601,8 +595,8 @@ class BaseDatabaseWrapper:
         """
         if self.connection is not None:
             self.health_check_done = False
-            # If the application didn't restore the original autocommit setting,
-            # don't take chances, drop the connection.
+            # If the application didn't restore the original autocommit
+            # setting, don't take chances, drop the connection.
             if self.get_autocommit() != self.settings_dict["AUTOCOMMIT"]:
                 self.close()
                 return

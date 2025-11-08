@@ -2,6 +2,10 @@ import json
 
 from django.contrib.postgres import lookups
 from django.contrib.postgres.forms import SimpleArrayField
+from django.contrib.postgres.utils import (
+    CheckPostgresInstalledMixin,
+    prefix_validation_error,
+)
 from django.contrib.postgres.validators import ArrayMaxLengthValidator
 from django.core import checks, exceptions
 from django.db.models import Field, Func, IntegerField, Transform, Value
@@ -9,13 +13,12 @@ from django.db.models.fields.mixins import CheckFieldDefaultMixin
 from django.db.models.lookups import Exact, In
 from django.utils.translation import gettext_lazy as _
 
-from ..utils import prefix_validation_error
 from .utils import AttributeSetter
 
 __all__ = ["ArrayField"]
 
 
-class ArrayField(CheckFieldDefaultMixin, Field):
+class ArrayField(CheckPostgresInstalledMixin, CheckFieldDefaultMixin, Field):
     empty_strings_allowed = False
     default_error_messages = {
         "item_invalid": _("Item %(nth)s in the array did not validate:"),
@@ -67,13 +70,14 @@ class ArrayField(CheckFieldDefaultMixin, Field):
                 )
             )
         else:
-            # Remove the field name checks as they are not needed here.
             base_checks = self.base_field.check()
             if base_checks:
                 error_messages = "\n    ".join(
                     "%s (%s)" % (base_check.msg, base_check.id)
                     for base_check in base_checks
                     if isinstance(base_check, checks.Error)
+                    # Prevent duplication of E005 in an E001 check.
+                    and not base_check.id == "postgres.E005"
                 )
                 if error_messages:
                     errors.append(
@@ -131,16 +135,18 @@ class ArrayField(CheckFieldDefaultMixin, Field):
             ]
         return value
 
+    def get_db_prep_save(self, value, connection):
+        if isinstance(value, (list, tuple)):
+            return [self.base_field.get_db_prep_save(i, connection) for i in value]
+        return value
+
     def deconstruct(self):
         name, path, args, kwargs = super().deconstruct()
         if path == "django.contrib.postgres.fields.array.ArrayField":
             path = "django.contrib.postgres.fields.ArrayField"
-        kwargs.update(
-            {
-                "base_field": self.base_field.clone(),
-                "size": self.size,
-            }
-        )
+        kwargs["base_field"] = self.base_field.clone()
+        if self.size is not None:
+            kwargs["size"] = self.size
         return name, path, args, kwargs
 
     def to_python(self, value):
@@ -169,7 +175,7 @@ class ArrayField(CheckFieldDefaultMixin, Field):
             else:
                 obj = AttributeSetter(base_field.attname, val)
                 values.append(base_field.value_to_string(obj))
-        return json.dumps(values)
+        return json.dumps(values, ensure_ascii=False)
 
     def get_transform(self, name):
         transform = super().get_transform(name)
@@ -234,10 +240,16 @@ class ArrayField(CheckFieldDefaultMixin, Field):
             }
         )
 
+    def slice_expression(self, expression, start, length):
+        # If length is not provided, don't specify an end to slice to the end
+        # of the array.
+        end = None if length is None else start + length - 1
+        return SliceTransform(start, end, expression)
+
 
 class ArrayRHSMixin:
     def __init__(self, lhs, rhs):
-        # Don't wrap arrays that contains only None values, psycopg2 doesn't
+        # Don't wrap arrays that contains only None values, psycopg doesn't
         # allow this.
         if isinstance(rhs, (tuple, list)) and any(self._rhs_not_none_values(rhs)):
             expressions = []
@@ -297,7 +309,7 @@ class ArrayLenTransform(Transform):
         return (
             "CASE WHEN %(lhs)s IS NULL THEN NULL ELSE "
             "coalesce(array_length(%(lhs)s, 1), 0) END"
-        ) % {"lhs": lhs}, params
+        ) % {"lhs": lhs}, params * 2
 
 
 @ArrayField.register_lookup
@@ -325,7 +337,9 @@ class IndexTransform(Transform):
 
     def as_sql(self, compiler, connection):
         lhs, params = compiler.compile(self.lhs)
-        return "%s[%%s]" % lhs, params + [self.index]
+        if not lhs.endswith("]"):
+            lhs = "(%s)" % lhs
+        return "%s[%%s]" % lhs, (*params, self.index)
 
     @property
     def output_field(self):
@@ -349,7 +363,11 @@ class SliceTransform(Transform):
 
     def as_sql(self, compiler, connection):
         lhs, params = compiler.compile(self.lhs)
-        return "%s[%%s:%%s]" % lhs, params + [self.start, self.end]
+        # self.start is set to 1 if slice start is not provided.
+        if self.end is None:
+            return f"({lhs})[%s:]", (*params, self.start)
+        else:
+            return f"({lhs})[%s:%s]", (*params, self.start, self.end)
 
 
 class SliceTransformFactory:

@@ -55,7 +55,7 @@ class OneTimeReceiver:
 
 
 # We connect receiver here and not in unit test code because we need to
-# connect receiver before test runner creates database.  That is, sequence of
+# connect receiver before test runner creates database. That is, sequence of
 # actions would be:
 #
 #   1. Test runner imports this module.
@@ -67,7 +67,6 @@ post_migrate_receiver = OneTimeReceiver(signals.post_migrate)
 
 
 class MigrateSignalTests(TransactionTestCase):
-
     available_apps = ["migrate_signals"]
 
     def test_call_time(self):

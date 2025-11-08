@@ -9,10 +9,12 @@ from django.db import models
 from django.forms.formsets import formset_factory
 from django.forms.models import (
     BaseModelFormSet,
+    ModelForm,
     _get_foreign_key,
     inlineformset_factory,
     modelformset_factory,
 )
+from django.forms.renderers import DjangoTemplates
 from django.http import QueryDict
 from django.test import TestCase, skipUnlessDBFeature
 
@@ -102,8 +104,8 @@ class DeletionTests(TestCase):
 
     def test_change_form_deletion_when_invalid(self):
         """
-        Make sure that a change form that is filled out, but marked for deletion
-        doesn't cause validation errors.
+        Make sure that a change form that is filled out, but marked for
+        deletion doesn't cause validation errors.
         """
         PoetFormSet = modelformset_factory(Poet, fields="__all__", can_delete=True)
         poet = Poet.objects.create(name="test")
@@ -761,7 +763,7 @@ class ModelFormsetTest(TestCase):
 
     def test_inline_formsets_save_as_new(self):
         # The save_as_new parameter lets you re-associate the data to a new
-        # instance.  This is used in the admin for save_as functionality.
+        # instance. This is used in the admin for save_as functionality.
         AuthorBooksFormSet = inlineformset_factory(
             Author, Book, can_delete=False, extra=2, fields="__all__"
         )
@@ -1158,7 +1160,7 @@ class ModelFormsetTest(TestCase):
             'maxlength="100"></p>',
         )
 
-        # Custom primary keys with ForeignKey, OneToOneField and AutoField ############
+        # Custom primary keys with ForeignKey, OneToOneField and AutoField.
 
         place = Place.objects.create(pk=1, name="Giordanos", city="Chicago")
 
@@ -1536,8 +1538,8 @@ class ModelFormsetTest(TestCase):
             ],
         )
 
-        # unique_together with inlineformset_factory with overridden form fields
-        # Also see #9494
+        # unique_together with inlineformset_factory with overridden form
+        # fields Also see #9494
 
         FormSet = inlineformset_factory(
             Repository, Revision, fields=("revision",), extra=1
@@ -1562,9 +1564,10 @@ class ModelFormsetTest(TestCase):
         )
         formset = FormSet(instance=person)
 
-        # Django will render a hidden field for model fields that have a callable
-        # default. This is required to ensure the value is tested for change correctly
-        # when determine what extra forms have changed to save.
+        # Django will render a hidden field for model fields that have a
+        # callable default. This is required to ensure the value is tested for
+        # change correctly when determine what extra forms have changed to
+        # save.
 
         self.assertEqual(len(formset.forms), 1)  # this formset only has one form
         form = formset.forms[0]
@@ -1592,7 +1595,8 @@ class ModelFormsetTest(TestCase):
             'id="id_membership_set-0-id"></p>' % person.id,
         )
 
-        # test for validation with callable defaults. Validations rely on hidden fields
+        # test for validation with callable defaults. Validations rely on
+        # hidden fields
 
         data = {
             "membership_set-TOTAL_FORMS": "1",
@@ -1683,9 +1687,10 @@ class ModelFormsetTest(TestCase):
 
             class Meta:
                 model = Book
-                fields = ("title",)
+                fields = ["title"]
 
         BookFormSet = inlineformset_factory(Author, Book, form=BookForm)
+        self.assertEqual(BookForm.Meta.fields, ["title"])
         data = {
             "book_set-TOTAL_FORMS": "3",
             "book_set-INITIAL_FORMS": "0",
@@ -1696,14 +1701,39 @@ class ModelFormsetTest(TestCase):
         }
         author = Author.objects.create(name="test")
         formset = BookFormSet(data, instance=author)
+        self.assertEqual(BookForm.Meta.fields, ["title"])
+        self.assertEqual(
+            formset.errors,
+            [{}, {"__all__": ["Please correct the duplicate values below."]}, {}],
+        )
+
+    def test_inlineformset_with_jsonfield(self):
+        class BookForm(forms.ModelForm):
+            title = forms.JSONField()
+
+            class Meta:
+                model = Book
+                fields = ("title",)
+
+        BookFormSet = inlineformset_factory(Author, Book, form=BookForm)
+        data = {
+            "book_set-TOTAL_FORMS": "3",
+            "book_set-INITIAL_FORMS": "0",
+            "book_set-MAX_NUM_FORMS": "",
+            "book_set-0-title": {"test1": "test2"},
+            "book_set-1-title": {"test1": "test2"},
+            "book_set-2-title": {"test3": "test4"},
+        }
+        author = Author.objects.create(name="test")
+        formset = BookFormSet(data, instance=author)
         self.assertEqual(
             formset.errors,
             [{}, {"__all__": ["Please correct the duplicate values below."]}, {}],
         )
 
     def test_model_formset_with_custom_pk(self):
-        # a formset for a Model that has a custom primary key that still needs to be
-        # added to the formset automatically
+        # a formset for a Model that has a custom primary key that still needs
+        # to be added to the formset automatically
         FormSet = modelformset_factory(
             ClassyMexicanRestaurant, fields=["tacos_are_yummy"]
         )
@@ -2365,3 +2395,44 @@ class TestModelFormsetOverridesTroughFormMeta(TestCase):
         BookFormSet = modelformset_factory(Author, fields="__all__", renderer=renderer)
         formset = BookFormSet()
         self.assertEqual(formset.renderer, renderer)
+
+    def test_modelformset_factory_default_renderer(self):
+        class CustomRenderer(DjangoTemplates):
+            pass
+
+        class ModelFormWithDefaultRenderer(ModelForm):
+            default_renderer = CustomRenderer()
+
+        BookFormSet = modelformset_factory(
+            Author, form=ModelFormWithDefaultRenderer, fields="__all__"
+        )
+        formset = BookFormSet()
+        self.assertEqual(
+            formset.forms[0].renderer, ModelFormWithDefaultRenderer.default_renderer
+        )
+        self.assertEqual(
+            formset.empty_form.renderer, ModelFormWithDefaultRenderer.default_renderer
+        )
+        self.assertIsInstance(formset.renderer, DjangoTemplates)
+
+    def test_inlineformset_factory_default_renderer(self):
+        class CustomRenderer(DjangoTemplates):
+            pass
+
+        class ModelFormWithDefaultRenderer(ModelForm):
+            default_renderer = CustomRenderer()
+
+        BookFormSet = inlineformset_factory(
+            Author,
+            Book,
+            form=ModelFormWithDefaultRenderer,
+            fields="__all__",
+        )
+        formset = BookFormSet()
+        self.assertEqual(
+            formset.forms[0].renderer, ModelFormWithDefaultRenderer.default_renderer
+        )
+        self.assertEqual(
+            formset.empty_form.renderer, ModelFormWithDefaultRenderer.default_renderer
+        )
+        self.assertIsInstance(formset.renderer, DjangoTemplates)

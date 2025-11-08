@@ -144,35 +144,40 @@ class FileTests(unittest.TestCase):
         self.assertEqual(list(f), ["one\n", "two\n", "three"])
 
     def test_readable(self):
-        with tempfile.TemporaryFile() as temp, File(
-            temp, name="something.txt"
-        ) as test_file:
+        with (
+            tempfile.TemporaryFile() as temp,
+            File(temp, name="something.txt") as test_file,
+        ):
             self.assertTrue(test_file.readable())
         self.assertFalse(test_file.readable())
 
     def test_writable(self):
-        with tempfile.TemporaryFile() as temp, File(
-            temp, name="something.txt"
-        ) as test_file:
+        with (
+            tempfile.TemporaryFile() as temp,
+            File(temp, name="something.txt") as test_file,
+        ):
             self.assertTrue(test_file.writable())
         self.assertFalse(test_file.writable())
-        with tempfile.TemporaryFile("rb") as temp, File(
-            temp, name="something.txt"
-        ) as test_file:
+        with (
+            tempfile.TemporaryFile("rb") as temp,
+            File(temp, name="something.txt") as test_file,
+        ):
             self.assertFalse(test_file.writable())
 
     def test_seekable(self):
-        with tempfile.TemporaryFile() as temp, File(
-            temp, name="something.txt"
-        ) as test_file:
+        with (
+            tempfile.TemporaryFile() as temp,
+            File(temp, name="something.txt") as test_file,
+        ):
             self.assertTrue(test_file.seekable())
         self.assertFalse(test_file.seekable())
 
     def test_io_wrapper(self):
         content = "vive l'été\n"
-        with tempfile.TemporaryFile() as temp, File(
-            temp, name="something.txt"
-        ) as test_file:
+        with (
+            tempfile.TemporaryFile() as temp,
+            File(temp, name="something.txt") as test_file,
+        ):
             test_file.write(content.encode())
             test_file.seek(0)
             wrapper = TextIOWrapper(test_file, "utf-8", newline="\n")
@@ -199,6 +204,21 @@ class FileTests(unittest.TestCase):
             self.assertIs(locks.lock(f2, locks.LOCK_SH | locks.LOCK_NB), True)
             self.assertIs(locks.unlock(f1), True)
             self.assertIs(locks.unlock(f2), True)
+
+    def test_open_supports_full_signature(self):
+        called = False
+
+        def opener(path, flags):
+            nonlocal called
+            called = True
+            return os.open(path, flags)
+
+        file_path = Path(__file__).parent / "test.png"
+        with open(file_path) as f:
+            test_file = File(f)
+
+        with test_file.open(opener=opener):
+            self.assertIs(called, True)
 
 
 class NoNameFileTestCase(unittest.TestCase):
@@ -406,9 +426,10 @@ class FileMoveSafeTests(unittest.TestCase):
         handle_a, self.file_a = tempfile.mkstemp()
         handle_b, self.file_b = tempfile.mkstemp()
 
-        # file_move_safe() raises OSError if the destination file exists and
-        # allow_overwrite is False.
-        with self.assertRaises(FileExistsError):
+        # file_move_safe() raises FileExistsError if the destination file
+        # exists and allow_overwrite is False.
+        msg = r"Destination file .* exists and allow_overwrite is False\."
+        with self.assertRaisesRegex(FileExistsError, msg):
             file_move_safe(self.file_a, self.file_b, allow_overwrite=False)
 
         # should allow it and continue on if allow_overwrite is True
@@ -442,8 +463,8 @@ class FileMoveSafeTests(unittest.TestCase):
                 ):
                     with self.assertRaises(OSError):
                         file_move_safe(self.file_a, self.file_b, allow_overwrite=True)
-                # When copystat() throws PermissionError, copymode() error besides
-                # PermissionError isn't ignored.
+                # When copystat() throws PermissionError, copymode() error
+                # besides PermissionError isn't ignored.
                 with mock.patch(
                     "django.core.files.move.copystat", side_effect=permission_error
                 ):
@@ -474,6 +495,27 @@ class FileMoveSafeTests(unittest.TestCase):
             os.close(handle_a)
             os.close(handle_b)
             os.close(handle_c)
+
+    def test_file_move_ensure_truncation(self):
+        with tempfile.NamedTemporaryFile(delete=False) as src:
+            src.write(b"content")
+            src_name = src.name
+        self.addCleanup(
+            lambda: os.remove(src_name) if os.path.exists(src_name) else None
+        )
+
+        with tempfile.NamedTemporaryFile(delete=False) as dest:
+            dest.write(b"This is a longer content.")
+            dest_name = dest.name
+        self.addCleanup(os.remove, dest_name)
+
+        with mock.patch("django.core.files.move.os.rename", side_effect=OSError()):
+            file_move_safe(src_name, dest_name, allow_overwrite=True)
+
+        with open(dest_name, "rb") as f:
+            content = f.read()
+
+        self.assertEqual(content, b"content")
 
 
 class SpooledTempTests(unittest.TestCase):

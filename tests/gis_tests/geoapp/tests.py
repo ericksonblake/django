@@ -1,4 +1,3 @@
-import tempfile
 from io import StringIO
 
 from django.contrib.gis import gdal
@@ -15,6 +14,7 @@ from django.contrib.gis.geos import (
     Polygon,
     fromstr,
 )
+from django.core.files.temp import NamedTemporaryFile
 from django.core.management import call_command
 from django.db import DatabaseError, NotSupportedError, connection
 from django.db.models import F, OuterRef, Subquery
@@ -31,6 +31,7 @@ from .models import (
     NonConcreteModel,
     PennsylvaniaCity,
     State,
+    ThreeDimensionalFeature,
     Track,
 )
 
@@ -132,7 +133,7 @@ class GeoModelTest(TestCase):
             tx = Country.objects.get(mpoly__intersects=other_srid_pnt)
         self.assertEqual("Texas", tx.name)
 
-        # Creating San Antonio.  Remember the Alamo.
+        # Creating San Antonio. Remember the Alamo.
         sa = City.objects.create(name="San Antonio", point=other_srid_pnt)
 
         # Now verifying that San Antonio was transformed correctly
@@ -232,7 +233,7 @@ class GeoModelTest(TestCase):
         self.assertIn('"point": "%s"' % houston.point.ewkt, result)
 
         # Reload now dumped data
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as tmp:
+        with NamedTemporaryFile(mode="w", suffix=".json") as tmp:
             tmp.write(result)
             tmp.seek(0)
             call_command("loaddata", tmp.name, verbosity=0)
@@ -252,7 +253,13 @@ class GeoModelTest(TestCase):
         ]
         for klass in geometry_classes:
             g = klass(srid=4326)
-            feature = Feature.objects.create(name="Empty %s" % klass.__name__, geom=g)
+            model_class = Feature
+            if g.hasz:
+                if not connection.features.supports_3d_storage:
+                    continue
+                else:
+                    model_class = ThreeDimensionalFeature
+            feature = model_class.objects.create(name=f"Empty {klass.__name__}", geom=g)
             feature.refresh_from_db()
             if klass is LinearRing:
                 # LinearRing isn't representable in WKB, so GEOSGeomtry.wkb
@@ -360,14 +367,15 @@ class GeoLookupTest(TestCase):
         "Testing the 'left' and 'right' lookup types."
         # Left: A << B => true if xmax(A) < xmin(B)
         # Right: A >> B => true if xmin(A) > xmax(B)
-        # See: BOX2D_left() and BOX2D_right() in lwgeom_box2dfloat4.c in PostGIS source.
+        # See: BOX2D_left() and BOX2D_right() in lwgeom_box2dfloat4.c in
+        # PostGIS source.
 
         # Getting the borders for Colorado & Kansas
         co_border = State.objects.get(name="Colorado").poly
         ks_border = State.objects.get(name="Kansas").poly
 
-        # Note: Wellington has an 'X' value of 174, so it will not be considered
-        # to the left of CO.
+        # Note: Wellington has an 'X' value of 174, so it will not be
+        # considered to the left of CO.
 
         # These cities should be strictly to the right of the CO border.
         cities = [
@@ -390,7 +398,8 @@ class GeoLookupTest(TestCase):
         for c in qs:
             self.assertIn(c.name, cities)
 
-        # Note: Wellington has an 'X' value of 174, so it will not be considered
+        # Note: Wellington has an 'X' value of 174, so it will not be
+        # considered
         #  to the left of CO.
         vic = City.objects.get(point__left=co_border)
         self.assertEqual("Victoria", vic.name)
@@ -434,7 +443,8 @@ class GeoLookupTest(TestCase):
         nullqs = State.objects.filter(poly__isnull=True)
         validqs = State.objects.filter(poly__isnull=False)
 
-        # Puerto Rico should be NULL (it's a commonwealth unincorporated territory)
+        # Puerto Rico should be NULL (it's a commonwealth unincorporated
+        # territory)
         self.assertEqual(1, len(nullqs))
         self.assertEqual("Puerto Rico", nullqs[0].name)
         # GeometryField=None is an alias for __isnull=True.
@@ -489,11 +499,47 @@ class GeoLookupTest(TestCase):
         with self.assertNoLogs("django.contrib.gis", "ERROR"):
             State.objects.filter(poly__intersects="LINESTRING(0 0, 1 1, 5 5)")
 
+    @skipUnlessGISLookup("coveredby")
+    def test_coveredby_lookup(self):
+        poly = Polygon(LinearRing((0, 0), (0, 5), (5, 5), (5, 0), (0, 0)))
+        state = State.objects.create(name="Test", poly=poly)
+
+        small_poly = Polygon(LinearRing((0, 0), (1, 4), (4, 4), (4, 1), (0, 0)))
+        qs = State.objects.filter(poly__coveredby=small_poly)
+        self.assertSequenceEqual(qs, [])
+
+        large_poly = Polygon(LinearRing((0, 0), (-1, 6), (6, 6), (6, -1), (0, 0)))
+        qs = State.objects.filter(poly__coveredby=large_poly)
+        self.assertSequenceEqual(qs, [state])
+
+        if not connection.ops.oracle:
+            # On Oracle, COVEREDBY doesn't match for EQUAL objects.
+            qs = State.objects.filter(poly__coveredby=poly)
+            self.assertSequenceEqual(qs, [state])
+
+    @skipUnlessGISLookup("covers")
+    def test_covers_lookup(self):
+        poly = Polygon(LinearRing((0, 0), (0, 5), (5, 5), (5, 0), (0, 0)))
+        state = State.objects.create(name="Test", poly=poly)
+
+        small_poly = Polygon(LinearRing((0, 0), (1, 4), (4, 4), (4, 1), (0, 0)))
+        qs = State.objects.filter(poly__covers=small_poly)
+        self.assertSequenceEqual(qs, [state])
+
+        large_poly = Polygon(LinearRing((-1, -1), (-1, 6), (6, 6), (6, -1), (-1, -1)))
+        qs = State.objects.filter(poly__covers=large_poly)
+        self.assertSequenceEqual(qs, [])
+
+        if not connection.ops.oracle:
+            # On Oracle, COVERS doesn't match for EQUAL objects.
+            qs = State.objects.filter(poly__covers=poly)
+            self.assertSequenceEqual(qs, [state])
+
     @skipUnlessDBFeature("supports_relate_lookup")
     def test_relate_lookup(self):
         "Testing the 'relate' lookup type."
-        # To make things more interesting, we will have our Texas reference point in
-        # different SRIDs.
+        # To make things more interesting, we will have our Texas reference
+        # point in different SRIDs.
         pnt1 = fromstr("POINT (649287.0363174 4177429.4494686)", srid=2847)
         pnt2 = fromstr("POINT(-98.4919715741052 29.4333344025053)", srid=4326)
 
@@ -535,7 +581,12 @@ class GeoLookupTest(TestCase):
         # Testing within relation mask.
         ks = State.objects.get(name="Kansas")
         self.assertEqual(
-            "Lawrence", City.objects.get(point__relate=(ks.poly, within_mask)).name
+            "Lawrence",
+            # Remove ".filter(name="Lawrence")" once PostGIS 3.5.4 is released.
+            # https://lists.osgeo.org/pipermail/postgis-devel/2025-July/030581.html
+            City.objects.filter(name="Lawrence")
+            .get(point__relate=(ks.poly, within_mask))
+            .name,
         )
 
         # Testing intersection relation mask.
@@ -605,7 +656,8 @@ class GeoQuerySetTest(TestCase):
         #  SELECT ST_extent(point)
         #  FROM geoapp_city
         #  WHERE (name='Houston' or name='Dallas');`
-        #  => BOX(-96.8016128540039 29.7633724212646,-95.3631439208984 32.7820587158203)
+        #  => BOX(-96.8016128540039 29.7633724212646,-95.3631439208984
+        #  32.7820587158203)
         expected = (
             -96.8016128540039,
             29.7633724212646,
@@ -645,18 +697,16 @@ class GeoQuerySetTest(TestCase):
         self.assertIsNone(State.objects.aggregate(MakeLine("poly"))["poly__makeline"])
         # Reference query:
         # SELECT AsText(ST_MakeLine(geoapp_city.point)) FROM geoapp_city;
-        ref_line = GEOSGeometry(
-            "LINESTRING(-95.363151 29.763374,-96.801611 32.782057,"
-            "-97.521157 34.464642,174.783117 -41.315268,-104.609252 38.255001,"
-            "-95.23506 38.971823,-87.650175 41.850385,-123.305196 48.462611)",
-            srid=4326,
-        )
-        # We check for equality with a tolerance of 10e-5 which is a lower bound
-        # of the precisions of ref_line coordinates
         line = City.objects.aggregate(MakeLine("point"))["point__makeline"]
-        self.assertTrue(
-            ref_line.equals_exact(line, tolerance=10e-5), "%s != %s" % (ref_line, line)
-        )
+        ref_points = City.objects.values_list("point", flat=True)
+        self.assertIsInstance(line, LineString)
+        self.assertEqual(len(line), ref_points.count())
+        # Compare pairs of manually sorted points, as the default ordering is
+        # flaky.
+        for point, ref_city in zip(sorted(line), sorted(ref_points)):
+            point_x, point_y = point
+            self.assertAlmostEqual(point_x, ref_city.x, 5)
+            self.assertAlmostEqual(point_y, ref_city.y, 5)
 
     @skipUnlessDBFeature("supports_union_aggr")
     def test_unionagg(self):
@@ -664,7 +714,8 @@ class GeoQuerySetTest(TestCase):
         Testing the `Union` aggregate.
         """
         tx = Country.objects.get(name="Texas").mpoly
-        # Houston, Dallas -- Ordering may differ depending on backend or GEOS version.
+        # Houston, Dallas -- Ordering may differ depending on backend or GEOS
+        # version.
         union = GEOSGeometry("MULTIPOINT(-96.801611 32.782057,-95.363151 29.763374)")
         qs = City.objects.filter(point__within=tx)
         with self.assertRaises(ValueError):

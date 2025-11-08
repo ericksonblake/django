@@ -3,14 +3,18 @@ from operator import attrgetter
 
 from django.core.exceptions import FieldError
 from django.db.models import (
+    Case,
     CharField,
     Count,
     DateTimeField,
     F,
+    IntegerField,
     Max,
+    OrderBy,
     OuterRef,
     Subquery,
     Value,
+    When,
 )
 from django.db.models.functions import Length, Upper
 from django.test import TestCase
@@ -165,6 +169,12 @@ class OrderingTests(TestCase):
             ),
             [self.a3, self.a4, self.a1, self.a2],
         )
+        self.assertQuerySetEqualReversible(
+            Article.objects.annotate(upper_name=Upper("author__name")).order_by(
+                F("upper_name").asc(nulls_last=True), "headline"
+            ),
+            [self.a3, self.a4, self.a1, self.a2],
+        )
 
     def test_order_by_nulls_first(self):
         Article.objects.filter(headline="Article 3").update(author=self.author_1)
@@ -187,6 +197,12 @@ class OrderingTests(TestCase):
         self.assertQuerySetEqualReversible(
             Article.objects.order_by(
                 Upper("author__name").desc(nulls_first=True), "headline"
+            ),
+            [self.a1, self.a2, self.a4, self.a3],
+        )
+        self.assertQuerySetEqualReversible(
+            Article.objects.annotate(upper_name=Upper("author__name")).order_by(
+                F("upper_name").desc(nulls_first=True), "headline"
             ),
             [self.a1, self.a2, self.a4, self.a3],
         )
@@ -513,6 +529,17 @@ class OrderingTests(TestCase):
         qs = Article.objects.order_by(Value("1", output_field=CharField()), "-headline")
         self.assertSequenceEqual(qs, [self.a4, self.a3, self.a2, self.a1])
 
+    def test_order_by_case_when_constant_value(self):
+        qs = Article.objects.order_by(
+            Case(
+                When(pk__in=[], then=Value(1)),
+                default=Value(0),
+                output_field=IntegerField(),
+            ).desc(),
+            "pk",
+        )
+        self.assertSequenceEqual(qs, [self.a1, self.a2, self.a3, self.a4])
+
     def test_related_ordering_duplicate_table_reference(self):
         """
         An ordering referencing a model with an ordering referencing a model
@@ -607,3 +634,27 @@ class OrderingTests(TestCase):
             ),
             Author.objects.order_by(Length(Upper("name"))),
         )
+
+    def test_ordering_select_related_collision(self):
+        self.assertEqual(
+            Article.objects.select_related("author")
+            .annotate(name=Upper("author__name"))
+            .filter(pk=self.a1.pk)
+            .order_by(OrderBy(F("name")))
+            .first(),
+            self.a1,
+        )
+        self.assertEqual(
+            Article.objects.select_related("author")
+            .annotate(name=Upper("author__name"))
+            .filter(pk=self.a1.pk)
+            .order_by("name")
+            .first(),
+            self.a1,
+        )
+
+    def test_order_by_expr_query_reuse(self):
+        qs = Author.objects.annotate(num=Count("article")).order_by(
+            F("num").desc(), "pk"
+        )
+        self.assertCountEqual(qs, qs.iterator())

@@ -40,7 +40,7 @@ discussion.
 Use one of the :ref:`built-in template form renderers
 <built-in-template-form-renderers>` or implement your own. Custom renderers
 must implement a ``render(template_name, context, request=None)`` method. It
-should return a rendered templates (as a string) or raise
+should return a rendered template (as a string) or raise
 :exc:`~django.template.TemplateDoesNotExist`.
 
 .. class:: BaseRenderer
@@ -49,33 +49,31 @@ should return a rendered templates (as a string) or raise
 
     .. attribute:: form_template_name
 
-        .. versionadded:: 4.1
-
         The default name of the template to use to render a form.
 
-        Defaults to ``"django/forms/default.html"``, which is a proxy for
-        ``"django/forms/table.html"``.
-
-        .. deprecated:: 4.1
-
-        The ``"django/forms/default.html"`` template is deprecated and will be
-        removed in Django 5.0. The default will become
-        ``"django/forms/div.html"`` at that time.
+        Defaults to ``"django/forms/div.html"`` template.
 
     .. attribute:: formset_template_name
 
-        .. versionadded:: 4.1
-
         The default name of the template to use to render a formset.
 
-        Defaults to ``"django/forms/formsets/default.html"``, which is a proxy
-        for ``"django/forms/formsets/table.html"``.
+        Defaults to ``"django/forms/formsets/div.html"`` template.
 
-        .. deprecated:: 4.1
+    .. attribute:: field_template_name
 
-        The ``"django/forms/formset/default.html"`` template is deprecated and
-        will be removed in Django 5.0. The default will become
-        ``"django/forms/formset/div.html"`` template.
+        The default name of the template used to render a ``BoundField``.
+
+        Defaults to ``"django/forms/field.html"``
+
+    .. attribute:: bound_field_class
+
+        The default class used to represent form fields across the project.
+
+        Defaults to :class:`.BoundField` class.
+
+        This can be customized further using :attr:`.Form.bound_field_class`
+        for per-form overrides, or :attr:`.Field.bound_field_class` for
+        per-field overrides.
 
     .. method:: get_template(template_name)
 
@@ -109,26 +107,6 @@ If you want to render templates with customizations from your
 :setting:`TEMPLATES` setting, such as context processors for example, use the
 :class:`TemplatesSetting` renderer.
 
-.. class:: DjangoDivFormRenderer
-
-.. versionadded:: 4.1
-
-Subclass of :class:`DjangoTemplates` that specifies
-:attr:`~BaseRenderer.form_template_name` and
-:attr:`~BaseRenderer.formset_template_name` as ``"django/forms/div.html"`` and
-``"django/forms/formset/div.html"`` respectively.
-
-This is a transitional renderer for opt-in to the new ``<div>`` based
-templates, which are the default from Django 5.0.
-
-Apply this via the :setting:`FORM_RENDERER` setting::
-
-    FORM_RENDERER = "django.forms.renderers.DjangoDivFormRenderer"
-
-Once the ``<div>`` templates are the default, this transitional renderer will
-be deprecated, for removal in Django 6.0. The ``FORM_RENDERER`` declaration can
-be removed at that time.
-
 ``Jinja2``
 ----------
 
@@ -144,17 +122,6 @@ third-party apps must have Jinja2 templates. Unless you provide your own Jinja2
 templates for widgets that don't have any, you can't use this renderer. For
 example, :mod:`django.contrib.admin` doesn't include Jinja2 templates for its
 widgets due to their usage of Django template tags.
-
-.. class:: Jinja2DivFormRenderer
-
-.. versionadded:: 4.1
-
-A transitional renderer as per :class:`DjangoDivFormRenderer` above, but
-subclassing :class:`Jinja2` for use with the Jinja2 backend.
-
-Apply this via the :setting:`FORM_RENDERER` setting::
-
-    FORM_RENDERER = "django.forms.renderers.Jinja2DivFormRenderer"
 
 ``TemplatesSetting``
 --------------------
@@ -174,7 +141,8 @@ Using this renderer along with the built-in templates requires either:
   of one of your template engines. To generate that path::
 
     import django
-    django.__path__[0] + '/forms/templates'  # or '/forms/jinja2'
+
+    django.__path__[0] + "/forms/templates"  # or '/forms/jinja2'
 
 Using this renderer requires you to make sure the form templates your project
 needs can be located.
@@ -197,6 +165,14 @@ forms receive a dictionary with the following values:
 * ``fields``: All bound fields, except the hidden fields.
 * ``hidden_fields``: All hidden bound fields.
 * ``errors``: All non field related or hidden field related form errors.
+
+Context available in field templates
+====================================
+
+Field templates receive a context from :meth:`.BoundField.get_context`. By
+default, fields receive a dictionary with the following values:
+
+* ``field``: The :class:`~django.forms.BoundField`.
 
 Context available in widget templates
 =====================================
@@ -223,7 +199,7 @@ Overriding built-in formset templates
 :attr:`.BaseFormSet.template_name`
 
 To override formset templates, you must use the :class:`TemplatesSetting`
-renderer. Then overriding widget templates works :doc:`the same as
+renderer. Then overriding formset templates works :doc:`the same as
 </howto/overriding-templates>` overriding any other template in your project.
 
 .. _overriding-built-in-form-templates:
@@ -234,7 +210,18 @@ Overriding built-in form templates
 :attr:`.Form.template_name`
 
 To override form templates, you must use the :class:`TemplatesSetting`
-renderer. Then overriding widget templates works :doc:`the same as
+renderer. Then overriding form templates works :doc:`the same as
+</howto/overriding-templates>` overriding any other template in your project.
+
+.. _overriding-built-in-field-templates:
+
+Overriding built-in field templates
+===================================
+
+:attr:`.Field.template_name`
+
+To override field templates, you must use the :class:`TemplatesSetting`
+renderer. Then overriding field templates works :doc:`the same as
 </howto/overriding-templates>` overriding any other template in your project.
 
 .. _overriding-built-in-widget-templates:

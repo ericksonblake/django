@@ -4,13 +4,7 @@ from django.test import SimpleTestCase, TestCase, override_settings
 from django.test.client import RequestFactory
 from django.urls import reverse
 from django.views.generic.base import View
-from django.views.generic.edit import (
-    CreateView,
-    DeleteView,
-    DeleteViewCustomDeleteWarning,
-    FormMixin,
-    ModelFormMixin,
-)
+from django.views.generic.edit import CreateView, FormMixin, ModelFormMixin
 
 from . import views
 from .forms import AuthorForm
@@ -183,7 +177,7 @@ class CreateViewTests(TestCase):
 
     def test_create_without_redirect(self):
         msg = (
-            "No URL to redirect to.  Either provide a url or define a "
+            "No URL to redirect to. Either provide a url or define a "
             "get_absolute_url method on the Model."
         )
         with self.assertRaisesMessage(ImproperlyConfigured, msg):
@@ -345,7 +339,7 @@ class UpdateViewTests(TestCase):
 
     def test_update_without_redirect(self):
         msg = (
-            "No URL to redirect to.  Either provide a url or define a "
+            "No URL to redirect to. Either provide a url or define a "
             "get_absolute_url method on the Model."
         )
         with self.assertRaisesMessage(ImproperlyConfigured, msg):
@@ -476,21 +470,3 @@ class DeleteViewTests(TestCase):
             res.context_data["form"].errors["confirm"],
             ["This field is required."],
         )
-
-    # RemovedInDjango50Warning.
-    def test_delete_with_custom_delete(self):
-        class AuthorDeleteView(DeleteView):
-            model = Author
-
-            def delete(self, request, *args, **kwargs):
-                # Custom logic.
-                pass
-
-        msg = (
-            "DeleteView uses FormMixin to handle POST requests. As a "
-            "consequence, any custom deletion logic in "
-            "AuthorDeleteView.delete() handler should be moved to "
-            "form_valid()."
-        )
-        with self.assertWarnsMessage(DeleteViewCustomDeleteWarning, msg):
-            AuthorDeleteView()

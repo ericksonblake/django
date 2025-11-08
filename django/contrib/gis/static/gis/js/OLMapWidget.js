@@ -1,39 +1,40 @@
 /* global ol */
 'use strict';
-function GeometryTypeControl(opt_options) {
+class GeometryTypeControl extends ol.control.Control {
     // Map control to switch type when geometry type is unknown
-    const options = opt_options || {};
+    constructor(opt_options) {
+        const options = opt_options || {};
 
-    const element = document.createElement('div');
-    element.className = 'switch-type type-' + options.type + ' ol-control ol-unselectable';
-    if (options.active) {
-        element.classList.add("type-active");
-    }
-
-    const self = this;
-    const switchType = function(e) {
-        e.preventDefault();
-        if (options.widget.currentGeometryType !== self) {
-            options.widget.map.removeInteraction(options.widget.interactions.draw);
-            options.widget.interactions.draw = new ol.interaction.Draw({
-                features: options.widget.featureCollection,
-                type: options.type
-            });
-            options.widget.map.addInteraction(options.widget.interactions.draw);
-            options.widget.currentGeometryType.element.classList.remove('type-active');
-            options.widget.currentGeometryType = self;
+        const element = document.createElement('div');
+        element.className = 'switch-type type-' + options.type + ' ol-control ol-unselectable';
+        if (options.active) {
             element.classList.add("type-active");
         }
-    };
 
-    element.addEventListener('click', switchType, false);
-    element.addEventListener('touchstart', switchType, false);
+        super({
+            element: element,
+            target: options.target
+        });
+        const self = this;
+        const switchType = function(e) {
+            e.preventDefault();
+            if (options.widget.currentGeometryType !== self) {
+                options.widget.map.removeInteraction(options.widget.interactions.draw);
+                options.widget.interactions.draw = new ol.interaction.Draw({
+                    features: options.widget.featureCollection,
+                    type: options.type
+                });
+                options.widget.map.addInteraction(options.widget.interactions.draw);
+                options.widget.currentGeometryType.element.classList.remove('type-active');
+                options.widget.currentGeometryType = self;
+                element.classList.add("type-active");
+            }
+        };
 
-    ol.control.Control.call(this, {
-        element: element
-    });
-};
-ol.inherits(GeometryTypeControl, ol.control.Control);
+        element.addEventListener('click', switchType, false);
+        element.addEventListener('touchstart', switchType, false);
+    }
+}
 
 // TODO: allow deleting individual features (#8972)
 class MapWidget {
@@ -53,19 +54,22 @@ class MapWidget {
 
         // Altering using user-provided options
         for (const property in options) {
-            if (options.hasOwnProperty(property)) {
+            if (Object.hasOwn(options, property)) {
                 this.options[property] = options[property];
             }
         }
-        if (!options.base_layer) {
-            this.options.base_layer = new ol.layer.Tile({source: new ol.source.OSM()});
+
+        // Options' base_layer can be empty, or contain a layerBuilder key, or
+        // be a layer already constructed.
+        const base_layer = options.base_layer;
+        if (typeof base_layer === 'string' && base_layer in MapWidget.layerBuilder) {
+            this.baseLayer = MapWidget.layerBuilder[base_layer]();
+        } else if (base_layer && typeof base_layer !== 'string') {
+            this.baseLayer = base_layer;
+        } else {
+            this.baseLayer = MapWidget.layerBuilder.osm();
         }
 
-        // RemovedInDjango51Warning: when the deprecation ends, remove setting
-        // width/height (3 lines below).
-        const mapContainer = document.getElementById(this.options.map_id);
-        mapContainer.style.width = `${mapContainer.dataset.width}px`;
-        mapContainer.style.height = `${mapContainer.dataset.height}px`;
         this.map = this.createMap();
         this.featureCollection = new ol.Collection();
         this.featureOverlay = new ol.layer.Vector({
@@ -124,7 +128,7 @@ class MapWidget {
     createMap() {
         return new ol.Map({
             target: this.options.map_id,
-            layers: [this.options.base_layer],
+            layers: [this.baseLayer],
             view: new ol.View({
                 zoom: this.options.default_zoom
             })
@@ -235,3 +239,45 @@ class MapWidget {
         document.getElementById(this.options.id).value = jsonFormat.writeGeometry(geometry);
     }
 }
+
+// Static property assignment (ES6-compatible)
+MapWidget.layerBuilder = {
+    nasaWorldview: () => {
+        return new ol.layer.Tile({
+            source: new ol.source.XYZ({
+                attributions: "NASA Worldview",
+                maxZoom: 8,
+                url: "https://map1{a-c}.vis.earthdata.nasa.gov/wmts-webmerc/" +
+                     "BlueMarble_ShadedRelief_Bathymetry/default/%7BTime%7D/" +
+                     "GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg"
+            })
+        });
+    },
+    osm: () => {
+        return new ol.layer.Tile({source: new ol.source.OSM()});
+    }
+};
+
+function initMapWidgetInSection(section) {
+    const maps = [];
+
+    section.querySelectorAll(".dj_map_wrapper").forEach((wrapper) => {
+        // Avoid initializing map widget on an empty form.
+        if (wrapper.id.includes('__prefix__')) {
+            return;
+        }
+        const textarea_id = wrapper.querySelector("textarea").id;
+        const options_script = wrapper.querySelector(`script#${textarea_id}_mapwidget_options`);
+        const options = JSON.parse(options_script.textContent);
+        options.id = textarea_id;
+        options.map_id = wrapper.querySelector(".dj_map").id;
+        maps.push(new MapWidget(options));
+    });
+
+    return maps;
+};
+
+document.addEventListener("DOMContentLoaded", () => {
+    initMapWidgetInSection(document);
+    document.addEventListener('formset:added', (ev) => {initMapWidgetInSection(ev.target);});
+});
